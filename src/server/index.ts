@@ -27,6 +27,19 @@ import {
 } from './transport/sse';
 import { SlidingWindowRateLimiter } from './transport/rate-limiter';
 import { IdempotencyManager, idempotencyManager } from './transport/idempotency';
+import {
+  registerCoreTools,
+  getCatalogItems,
+  getCatalogItemBySku,
+  getRecipes,
+  getRecipeById,
+  getCart,
+  addItemToCart,
+  addBundleToCart,
+  removeItemFromCart,
+  clearCart,
+  resetAllCarts,
+} from './mcp/tools';
 
 // Re-exports for public interface
 export {
@@ -37,6 +50,17 @@ export {
   clearTools,
   broadcastSseEvent,
   getActiveSseSubscriberCount,
+  registerCoreTools,
+  getCatalogItems,
+  getCatalogItemBySku,
+  getRecipes,
+  getRecipeById,
+  getCart,
+  addItemToCart,
+  addBundleToCart,
+  removeItemFromCart,
+  clearCart,
+  resetAllCarts,
 };
 export type { ServerOptions, McpToolRegistration, McpSseEvent, RequestContext };
 
@@ -53,6 +77,9 @@ export async function createMcpServer(options: ServerOptions = {}): Promise<Fast
       `Security violation: MCP server must bind strictly to loopback (127.0.0.1), got "${host}"`
     );
   }
+
+  // Register core MCP tools by default (MOD-02)
+  registerCoreTools();
 
   const server = Fastify({
     bodyLimit: BODY_LIMIT,
