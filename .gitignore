@@ -1,0 +1,56 @@
+# Dependencies and tool caches
+node_modules/
+.pnp
+.pnp.js
+.cache/
+.turbo/
+
+# Test and build outputs
+coverage/
+dist/
+build/
+.next/
+out/
+
+# Local runtime state and generated evidence
+.agent-runtime/
+artifacts/
+output/
+tmp/
+.agents/reports/generated/
+
+# Environment and secret material
+.env*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# CLEAN_EXPORT_MODE
+# Ignore agent workflows, specs, prompts, and internal documentation from public repository
+.agents/
+.agent-runtime/
+artifacts/
+output/
+tmp/
+AGENTS.md
+DESIGN.md
+Documentation/
+docs/
+.github/workflows/framework-validation.yml
