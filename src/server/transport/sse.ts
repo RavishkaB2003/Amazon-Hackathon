@@ -117,9 +117,9 @@ export class SseManager {
     }
     lines.push(`data: ${JSON.stringify(event.data)}`);
     const message = lines.join('\n') + '\n\n';
-
     for (const [id, subscriber] of this.subscribers.entries()) {
-      if (targetSessionId && subscriber.sessionId && subscriber.sessionId !== targetSessionId) {
+      // Strict unicast: when targetSessionId is specified, deliver only to subscribers with matching sessionId
+      if (targetSessionId && subscriber.sessionId !== targetSessionId) {
         continue;
       }
       try {
