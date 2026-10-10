@@ -40,6 +40,11 @@ import {
   clearCart,
   resetAllCarts,
 } from './mcp/tools';
+import {
+  registerAgentRoutes,
+  AgentService,
+  agentService,
+} from './agent';
 
 // Re-exports for public interface
 export {
@@ -61,6 +66,9 @@ export {
   removeItemFromCart,
   clearCart,
   resetAllCarts,
+  registerAgentRoutes,
+  AgentService,
+  agentService,
 };
 export type { ServerOptions, McpToolRegistration, McpSseEvent, RequestContext };
 
@@ -68,7 +76,9 @@ const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = '127.0.0.1';
 const BODY_LIMIT = 1048576; // 1 MB
 
-export async function createMcpServer(options: ServerOptions = {}): Promise<FastifyInstance> {
+export async function createMcpServer(
+  options: ServerOptions & { agentService?: AgentService } = {}
+): Promise<FastifyInstance> {
   const host = options.host || DEFAULT_HOST;
 
   // Strict loopback binding security enforcement (SEC-003)
@@ -215,6 +225,9 @@ export async function createMcpServer(options: ServerOptions = {}): Promise<Fast
 
   server.decorate('sseManager', currentSseManager);
   server.decorate('rateLimiter', rateLimiter);
+
+  // Register Agent routes (MOD-03)
+  registerAgentRoutes(server, options.agentService);
 
   return server;
 }
