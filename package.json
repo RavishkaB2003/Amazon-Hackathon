@@ -13,6 +13,8 @@
     "test:integration": "vitest run tests/integration --config vite.config.ts",
     "test:api-matrix": "vitest run tests/integration/mcp/api-matrix.test.ts --config vite.config.ts",
     "test:http": "vitest run tests/integration/mcp/http-transport.test.ts --config vite.config.ts",
+    "benchmark": "tsx scripts/benchmark-scenarios.ts",
+    "demo": "tsx scripts/demo-personas.ts",
     "start": "tsx src/server/index.ts"
   },
   "dependencies": {

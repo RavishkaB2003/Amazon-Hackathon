@@ -22,7 +22,7 @@ import {
 import {
   SseManager,
   sseManager,
-  broadcastSseEvent,
+  broadcastSseEvent as rawBroadcastSseEvent,
   getActiveSseSubscriberCount,
 } from './transport/sse';
 import { SlidingWindowRateLimiter } from './transport/rate-limiter';
@@ -45,6 +45,24 @@ import {
   AgentService,
   agentService,
 } from './agent';
+import { registerDiagnosticsRoutes } from './routes/diagnostics';
+import { wireRingBuffer, RingBuffer } from './diagnostics/ring-buffer';
+import { frictionLogger, FrictionLogger } from './diagnostics/friction-logger';
+import { piiScrubber } from './diagnostics/pii-scrubber';
+
+/**
+ * Broadcasts an SSE event and logs to in-memory wire ring buffer (MOD-05)
+ */
+export function broadcastSseEvent(event: McpSseEvent, sessionId?: string): void {
+  wireRingBuffer.push({
+    direction: 'SSE_EVENT',
+    type: 'SSE',
+    method: event.event || 'message',
+    sessionId,
+    payload: event.data,
+  });
+  rawBroadcastSseEvent(event, sessionId);
+}
 
 // Re-exports for public interface
 export {
@@ -53,7 +71,6 @@ export {
   listRegisteredTools,
   getTool,
   clearTools,
-  broadcastSseEvent,
   getActiveSseSubscriberCount,
   registerCoreTools,
   getCatalogItems,
@@ -69,6 +86,12 @@ export {
   registerAgentRoutes,
   AgentService,
   agentService,
+  registerDiagnosticsRoutes,
+  wireRingBuffer,
+  RingBuffer,
+  frictionLogger,
+  FrictionLogger,
+  piiScrubber,
 };
 export type { ServerOptions, McpToolRegistration, McpSseEvent, RequestContext };
 
@@ -127,41 +150,78 @@ export async function createMcpServer(
     allowedHeaders: ['Content-Type', 'Idempotency-Key', 'X-Session-Id', 'X-Request-Id'],
   });
 
+  // Wire logging preHandler for agent chat requests (MOD-05)
+  server.addHook('preHandler', async (request: FastifyRequest) => {
+    if (request.url.startsWith('/agent/chat') && request.method === 'POST') {
+      const sessionId =
+        (request.headers['x-session-id'] as string) ||
+        ((request.body as Record<string, unknown>)?.sessionId as string | undefined);
+
+      wireRingBuffer.push({
+        direction: 'INCOMING',
+        type: 'SSE',
+        method: 'POST /agent/chat',
+        sessionId,
+        payload: request.body,
+      });
+    }
+  });
+
   // Custom Error Handler for JSON-RPC compliance
   server.setErrorHandler((error, request, reply) => {
+    let errorStatus = 200;
+    let errorResponse: { jsonrpc: '2.0'; id: null; error: { code: number; message: string } };
+
     // Payload exceeds 1MB limit (Fastify 413)
     if (error.statusCode === 413 || error.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
-      return reply.status(413).send({
+      errorStatus = 413;
+      errorResponse = {
         jsonrpc: '2.0',
         id: null,
         error: {
           code: -32600,
           message: 'Invalid Request: Payload exceeds 1MB ceiling',
         },
-      });
-    }
-
-    // JSON syntax error (Parse error -32700)
-    if (error.statusCode === 400 || error instanceof SyntaxError || error.name === 'SyntaxError') {
-      return reply.status(200).send({
+      };
+    } else if (error.statusCode === 400 || error instanceof SyntaxError || error.name === 'SyntaxError') {
+      // JSON syntax error (Parse error -32700)
+      errorResponse = {
         jsonrpc: '2.0',
         id: null,
         error: {
           code: -32700,
           message: 'Parse error: Invalid JSON syntax',
         },
-      });
+      };
+    } else {
+      // Fallback internal error
+      errorResponse = {
+        jsonrpc: '2.0',
+        id: null,
+        error: {
+          code: -32603,
+          message: `Internal error: ${error.message}`,
+        },
+      };
     }
 
-    // Fallback internal error
-    return reply.status(200).send({
-      jsonrpc: '2.0',
-      id: null,
-      error: {
-        code: -32603,
-        message: `Internal error: ${error.message}`,
-      },
+    const rawReq = request.raw as unknown as { __startTime?: bigint };
+    const durationMs = rawReq.__startTime
+      ? Number(process.hrtime.bigint() - rawReq.__startTime) / 1_000_000
+      : undefined;
+
+    wireRingBuffer.push({
+      direction: 'OUTGOING',
+      type: 'JSON_RPC',
+      method: (request.body as Record<string, unknown>)?.method as string || 'error',
+      sessionId: (request.headers['x-session-id'] as string) || undefined,
+      statusCode: errorStatus,
+      durationMs,
+      payload: errorResponse,
+      error: errorResponse.error,
     });
+
+    return reply.status(errorStatus).send(errorResponse);
   });
 
   // Health check endpoint
@@ -172,21 +232,9 @@ export async function createMcpServer(
   // JSON-RPC 2.0 POST Endpoint
   server.post('/mcp', async (request: FastifyRequest, reply: FastifyReply) => {
     const clientIp = request.ip || '127.0.0.1';
+    const rawBody = request.body as Record<string, unknown> | undefined;
+    const method = rawBody?.method as string | undefined;
 
-    // 1. Sliding-window rate limit check
-    const rateCheck = rateLimiter.check(clientIp);
-    if (!rateCheck.allowed) {
-      return reply.status(429).send({
-        jsonrpc: '2.0',
-        id: null,
-        error: {
-          code: -32000,
-          message: 'Too Many Requests: Rate limit exceeded (60 req/min)',
-        },
-      });
-    }
-
-    // 2. Request context extraction
     const sessionId =
       (request.headers['x-session-id'] as string) ||
       ((request.query as Record<string, string>)?.sessionId ?? undefined);
@@ -195,6 +243,52 @@ export async function createMcpServer(
       `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const idempotencyKey = request.headers['idempotency-key'] as string | undefined;
 
+    // Log incoming JSON-RPC frame
+    wireRingBuffer.push({
+      direction: 'INCOMING',
+      type: 'JSON_RPC',
+      method: method || 'POST /mcp',
+      sessionId,
+      payload: request.body,
+    });
+
+    const sendWireResponse = (response: unknown, statusCode = 200) => {
+      const rawReq = request.raw as unknown as { __startTime?: bigint };
+      const durationMs = rawReq.__startTime
+        ? Number(process.hrtime.bigint() - rawReq.__startTime) / 1_000_000
+        : undefined;
+
+      wireRingBuffer.push({
+        direction: 'OUTGOING',
+        type: 'JSON_RPC',
+        method: method || 'POST /mcp',
+        sessionId,
+        statusCode,
+        durationMs,
+        payload: response,
+        error: (response as { error?: { code: number; message: string; data?: unknown } })?.error,
+      });
+
+      return reply.status(statusCode).send(response);
+    };
+
+    // 1. Sliding-window rate limit check
+    const rateCheck = rateLimiter.check(clientIp);
+    if (!rateCheck.allowed) {
+      return sendWireResponse(
+        {
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32000,
+            message: 'Too Many Requests: Rate limit exceeded (60 req/min)',
+          },
+        },
+        429
+      );
+    }
+
+    // 2. Request context extraction
     const context: RequestContext = {
       sessionId,
       requestId,
@@ -203,19 +297,18 @@ export async function createMcpServer(
     };
 
     // 3. Mutating call idempotency handling
-    const rawBody = request.body as Record<string, unknown> | undefined;
-    const isMutating = rawBody?.method === 'tools/call';
+    const isMutating = method === 'tools/call';
 
     if (idempotencyKey && isMutating) {
       const response = await idempotencyManager.executeOrGetCached(idempotencyKey, async () => {
         return dispatchJsonRpc(request.body, context);
       });
-      return reply.status(200).send(response);
+      return sendWireResponse(response, 200);
     }
 
     // 4. Standard dispatch
     const response = await dispatchJsonRpc(request.body, context);
-    return reply.status(200).send(response);
+    return sendWireResponse(response, 200);
   });
 
   // SSE Stream GET Endpoint
@@ -228,6 +321,9 @@ export async function createMcpServer(
 
   // Register Agent routes (MOD-03)
   registerAgentRoutes(server, options.agentService);
+
+  // Register Diagnostics routes (MOD-05)
+  registerDiagnosticsRoutes(server);
 
   return server;
 }

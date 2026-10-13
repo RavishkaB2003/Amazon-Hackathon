@@ -55,6 +55,31 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({
     }
   };
 
+  const handleExport = async () => {
+    if (onExportFrictionLog) {
+      onExportFrictionLog();
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/diagnostics/friction-log?format=markdown');
+      if (res.ok) {
+        const text = await res.text();
+        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'FRICTION_LOG.md';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+    } catch {
+      window.open('/api/diagnostics/friction-log?format=markdown', '_blank');
+    }
+  };
+
   if (!isOpen) {
     return null;
   }
@@ -140,13 +165,13 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({
           {/* Export Friction Log */}
           <button
             type="button"
-            onClick={onExportFrictionLog}
+            onClick={handleExport}
             data-testid="btn-export-friction-log"
             className="min-h-[48px] min-w-[48px] px-3 py-2 rounded-md bg-[#1e293b] border border-[#64748b] text-[#f8fafc] hover:bg-[#334155] hover:border-[#38bdf8] flex items-center gap-1.5 text-caption font-medium transition-colors focus-visible:outline-none"
             aria-label="Export FRICTION_LOG.md"
           >
             <Download className="w-4 h-4 text-[#38bdf8]" aria-hidden="true" />
-            <span className="hidden md:inline">Export Friction Log</span>
+            <span className="hidden md:inline">Export FRICTION_LOG.md</span>
           </button>
 
           {/* Clear Wire Log */}
