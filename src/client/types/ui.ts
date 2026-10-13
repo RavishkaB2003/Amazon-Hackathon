@@ -15,6 +15,7 @@ export interface HeaderBarProps {
   isInspectorOpen: boolean;
   viewportMode?: ViewportMode;
   onChangeViewport?: (mode: ViewportMode) => void;
+  showDebug?: boolean;
 }
 
 // Waveform Visualizer Contract (SCR-001)

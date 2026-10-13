@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useTransition } from 'react';
 import { HeaderBar } from './components/HeaderBar';
+import { AmbientHomeView } from './components/AmbientHomeView';
 import { WaveformVisualizer } from './components/WaveformVisualizer';
 import { PersonaQuickSelect } from './components/PersonaQuickSelect';
 import { SpokenFeed } from './components/SpokenFeed';
@@ -10,6 +11,7 @@ import { ProtocolInspector } from './components/ProtocolInspector';
 import { ConfirmModal } from './components/ConfirmModal';
 import { SseClient, type SseConnectionStatus } from './services/sse-client';
 import { apiClient } from './services/api-client';
+import { ArrowLeft } from 'lucide-react';
 import type {
   ViewportMode,
   RecipeCardProps,
@@ -17,7 +19,7 @@ import type {
   WireMessage,
 } from './types/ui';
 
-// Initial default demonstration recipe
+// Demonstration recipe payload when dynamically requested
 const DEFAULT_RECIPE: RecipeCardProps = {
   id: 'rec-mediterranean-salmon',
   title: 'Mediterranean Salmon Bowl',
@@ -36,7 +38,7 @@ const DEFAULT_RECIPE: RecipeCardProps = {
   onStartCooking: () => {},
 };
 
-// Initial default bundle items
+// Demonstration bundle items when dynamically requested
 const DEFAULT_BUNDLE_ITEMS: BundleItem[] = [
   {
     sku: 'FRESH-SALMON-02',
@@ -94,18 +96,30 @@ export const App: React.FC = () => {
   const [viewportMode, setViewportMode] = useState<ViewportMode>('echo-show-15');
   const [connectionStatus, setConnectionStatus] = useState<SseConnectionStatus>('connected');
   const [isMockMode, setIsMockMode] = useState<boolean>(true);
-  const [activePersona, setActivePersona] = useState<string | undefined>('elena');
+  const [activePersona, setActivePersona] = useState<string | undefined>(undefined);
   const [assistantState, setAssistantState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
-  const [spokenText, setSpokenText] = useState<string>('Welcome to Aura+. Select a persona or start speaking to prepare dinner within your family budget.');
+  const [spokenText, setSpokenText] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [speaker, setSpeaker] = useState<'aura' | 'user'>('aura');
 
-  // Widget States
-  const [recipe, setRecipe] = useState<RecipeCardProps | null>(DEFAULT_RECIPE);
-  const [bundleItems, setBundleItems] = useState<BundleItem[]>(DEFAULT_BUNDLE_ITEMS);
+  // Stage: 'ambient' (Idle Clock/Input) vs 'active' (Conversing, Dynamic Recipe/Bundle)
+  const [stage, setStage] = useState<'ambient' | 'active'>('ambient');
+
+  // Stealth Debug/Inspector Activation (?debug=true or Ctrl+`)
+  const [showDebug, setShowDebug] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search);
+      return p.get('debug') === 'true' || p.get('inspector') === '1';
+    }
+    return false;
+  });
+
+  // Dynamic Widget States (Null by default on ambient cold start)
+  const [recipe, setRecipe] = useState<RecipeCardProps | null>(null);
+  const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
   const [bundleId, setBundleId] = useState<string>('bnd-mediterranean-salmon-1728480000');
   const [maxBudget, setMaxBudget] = useState<number | undefined>(30.0);
-  const [savingsAmount, setSavingsAmount] = useState<number | undefined>(4.0);
+  const [savingsAmount, setSavingsAmount] = useState<number | undefined>(undefined);
   const [isGuidedCookingActive, setIsGuidedCookingActive] = useState<boolean>(false);
 
   // Cart State
@@ -124,9 +138,23 @@ export const App: React.FC = () => {
 
   const [, startTransition] = useTransition();
 
-  // Log incoming/outgoing wire messages
+  // Log incoming/outgoing wire messages to state & browser console
   const logWireMessage = useCallback((msg: WireMessage) => {
     setWireMessages((prev) => [msg, ...prev.slice(0, 199)]);
+    console.debug(`[Aura+ Wire ${msg.direction}]`, msg.type, msg.method || '', msg.payload);
+  }, []);
+
+  // Global Keyboard Shortcut: Ctrl + ` toggles Stealth Inspector Drawer
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+        e.preventDefault();
+        setShowDebug((prev) => !prev);
+        setIsInspectorOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   // Calculate bundle total price
@@ -146,6 +174,9 @@ export const App: React.FC = () => {
           method: `widget/${data.widgetType}`,
           payload: data,
         });
+
+        // Switch to active stage when a widget arrives
+        setStage('active');
 
         if (data.widgetType === 'recipe_card' && data.payload) {
           const p = data.payload as unknown as {
@@ -177,6 +208,8 @@ export const App: React.FC = () => {
             estimatedCost: p.estimatedCost || 24.5,
             onStartCooking: () => {},
           });
+        } else if (data.widgetType === 'product_carousel' && data.payload) {
+          setBundleItems(DEFAULT_BUNDLE_ITEMS);
         }
       },
       onError: (err) => {
@@ -198,32 +231,22 @@ export const App: React.FC = () => {
     };
   }, [sessionId, logWireMessage]);
 
-  // Persona trigger scenario
-  const handleSelectPersona = async (personaId: 'alex' | 'elena' | 'marcus') => {
-    setActivePersona(personaId);
+  // Handle conversational queries submitted from ambient input or chip
+  const handleSendQuery = async (queryText: string, personaId?: 'alex' | 'elena' | 'marcus') => {
+    setStage('active');
     setAssistantState('thinking');
     setIsStreaming(true);
     setSpeaker('aura');
+    if (personaId) {
+      setActivePersona(personaId);
+    }
 
-    const promptMap = {
-      alex: 'Quick 15-minute high dopamine dinner for 1 under $20',
-      elena: 'Family dinner for 4 under $30, strict dairy-free and peanut-free',
-      marcus: 'High-protein post-workout dinner >35g protein',
-    };
-
-    const budgetMap = {
-      alex: 20.0,
-      elena: 30.0,
-      marcus: 35.0,
-    };
-
-    setMaxBudget(budgetMap[personaId]);
     setSpokenText('');
 
     let streamAcc = '';
     await apiClient.sendChatStream(
       sessionId,
-      promptMap[personaId],
+      queryText,
       personaId,
       {
         onToken: (tok) => {
@@ -240,10 +263,18 @@ export const App: React.FC = () => {
           if (d.fallbackTriggered !== undefined) {
             setIsMockMode(d.fallbackTriggered);
           }
+          // Dynamically present curated recipe if none yet displayed
+          if (!recipe) {
+            setRecipe(DEFAULT_RECIPE);
+            setBundleItems(DEFAULT_BUNDLE_ITEMS);
+          }
         },
         onError: () => {
           setIsStreaming(false);
           setAssistantState('idle');
+          if (!recipe) {
+            setRecipe(DEFAULT_RECIPE);
+          }
         },
         onWireMessage: logWireMessage,
       }
@@ -328,6 +359,11 @@ export const App: React.FC = () => {
     setSpeaker('aura');
   };
 
+  // Return back to ambient idle screen without clearing cart state
+  const handleReturnToAmbient = () => {
+    setStage('ambient');
+  };
+
   // Clear Session Action (PRIV-002)
   const handleConfirmClearSession = async () => {
     try {
@@ -338,7 +374,9 @@ export const App: React.FC = () => {
 
     startTransition(() => {
       setSessionId(generateSessionId());
-      setSpokenText('Session cleared. Ephemeral memory wiped.');
+      setSpokenText('');
+      setRecipe(null);
+      setBundleItems([]);
       setCartCount(0);
       setCartSubtotal(0);
       setCartTax(0);
@@ -346,6 +384,8 @@ export const App: React.FC = () => {
       setCartVersion(1);
       setIsGuidedCookingActive(false);
       setIsCartConflict(false);
+      setStage('ambient');
+      setActivePersona(undefined);
       setWireMessages([]);
     });
 
@@ -391,13 +431,16 @@ ${JSON.stringify(m.payload, null, 2)}
     URL.revokeObjectURL(url);
   };
 
-  // Viewport Container Styles
+  // Viewport Container Styles when in developer debug mode
   const getViewportWrapperClass = () => {
+    if (!showDebug) {
+      return 'w-full max-w-7xl mx-auto min-h-screen';
+    }
     switch (viewportMode) {
       case 'mobile':
-        return 'max-w-[393px] mx-auto min-h-[852px] border-x border-[#334155] shadow-2xl';
+        return 'max-w-[393px] mx-auto min-h-[852px] border-x border-[#1e2d4a] shadow-2xl';
       case 'echo-show-8':
-        return 'max-w-[1280px] mx-auto min-h-[800px] border-x border-[#334155]';
+        return 'max-w-[1280px] mx-auto min-h-[800px] border-x border-[#1e2d4a]';
       case 'echo-show-15':
       default:
         return 'w-full max-w-[1920px] mx-auto min-h-screen';
@@ -407,19 +450,19 @@ ${JSON.stringify(m.payload, null, 2)}
   return (
     <div
       data-testid="app-root"
-      className="min-h-screen bg-[#0f172a] text-[#f8fafc] flex flex-col font-sans select-none overflow-x-hidden relative"
+      className="min-h-screen bg-[#080c14] text-[#f8fafc] flex flex-col font-sans select-none overflow-x-hidden relative"
     >
       {/* ========================================================
           LAYER 01: Background Layer (Fill frame, zero gradients)
           ======================================================== */}
       <div
         data-testid="layer-01-background"
-        className="fixed inset-0 bg-[#0f172a] pointer-events-none z-0"
+        className="fixed inset-0 bg-[#080c14] pointer-events-none z-0"
         aria-hidden="true"
       />
 
       {/* Viewport Frame Container */}
-      <div className={`relative z-10 flex flex-col flex-1 pb-32 bg-[#0f172a] ${getViewportWrapperClass()}`}>
+      <div className={`relative z-10 flex flex-col flex-1 pb-32 bg-[#080c14] ${getViewportWrapperClass()}`}>
         {/* ========================================================
             LAYER 02: Foreground Layer (Header, Content, Cards, Feed)
             ======================================================== */}
@@ -433,58 +476,107 @@ ${JSON.stringify(m.payload, null, 2)}
             onToggleInspector={() => setIsInspectorOpen((prev) => !prev)}
             isInspectorOpen={isInspectorOpen}
             viewportMode={viewportMode}
-            onChangeViewport={setViewportMode}
+            onChangeViewport={showDebug ? setViewportMode : undefined}
+            showDebug={showDebug}
           />
 
-          <main className="flex-1 px-4 sm:px-6 md:px-8 py-4 flex flex-col gap-4">
-            {/* Audio Waveform Spectrum */}
-            <WaveformVisualizer
-              state={assistantState}
-              audioLevel={assistantState === 'speaking' ? 0.7 : 0.3}
-            />
+          {/* Developer Debug Persona Selector */}
+          {showDebug && (
+            <div className="bg-[#111a2e] border-b border-[#1e2d4a] px-4 py-2 flex items-center justify-between">
+              <span className="text-xs text-[#94a3b8] uppercase font-bold tracking-wider">
+                Developer Test Harness Active (?debug=true)
+              </span>
+              <PersonaQuickSelect
+                onSelectPersona={(p) => {
+                  const promptMap = {
+                    alex: 'Quick 15-minute high dopamine dinner for 1 under $20',
+                    elena: 'Family dinner for 4 under $30, strict dairy-free and peanut-free',
+                    marcus: 'High-protein post-workout dinner >35g protein',
+                  };
+                  handleSendQuery(promptMap[p], p);
+                }}
+                activePersona={activePersona}
+                disabled={isStreaming}
+              />
+            </div>
+          )}
 
-            {/* Persona Quick Scenario Triggers */}
-            <PersonaQuickSelect
-              onSelectPersona={handleSelectPersona}
-              activePersona={activePersona}
-              disabled={isStreaming}
-            />
+          <main className="flex-1 px-4 sm:px-6 md:px-8 py-6 flex flex-col gap-6">
+            {/* STAGE 1: Ambient Idle Screen (Default Cold Start) */}
+            {stage === 'ambient' && (
+              <AmbientHomeView
+                onSearch={(q) => handleSendQuery(q)}
+                disabled={isStreaming}
+              />
+            )}
 
-            {/* Live Spoken Text Anchor */}
-            <SpokenFeed
-              spokenText={spokenText}
-              isStreaming={isStreaming}
-              speaker={speaker}
-            />
+            {/* STAGE 2+: Conversational Active Flow */}
+            {stage === 'active' && (
+              <div className="flex flex-col gap-6 max-w-6xl mx-auto w-full">
+                {/* Back to Ambient Screen Navigation */}
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={handleReturnToAmbient}
+                    className="min-h-[48px] px-4 py-2 rounded-xl bg-[#111a2e] border border-[#1e2d4a] text-[#94a3b8] hover:text-[#f8fafc] hover:border-[#38bdf8] transition-colors flex items-center gap-2 text-sm font-medium"
+                    aria-label="Return to Ambient Home Screen"
+                  >
+                    <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                    <span>Ambient Screen</span>
+                  </button>
 
-            {/* Main Interactive Stage: Recipe Card & Bundle Carousel */}
-            <div className="w-full max-w-6xl mx-auto my-2 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Recipe Card (Left on Desktop Show 15, Stacked on Show 8 / Mobile) */}
-              <div className="lg:col-span-5 w-full">
-                {recipe && (
-                  <RecipeCard
-                    {...recipe}
-                    onStartCooking={handleStartCooking}
-                    isGuidedCookingActive={isGuidedCookingActive}
+                  {/* Audio Waveform Spectrum */}
+                  <div className="w-48 sm:w-64">
+                    <WaveformVisualizer
+                      state={assistantState}
+                      audioLevel={assistantState === 'speaking' ? 0.7 : 0.3}
+                    />
+                  </div>
+                </div>
+
+                {/* Live Spoken Text Anchor */}
+                {spokenText && (
+                  <SpokenFeed
+                    spokenText={spokenText}
+                    isStreaming={isStreaming}
+                    speaker={speaker}
                   />
                 )}
-              </div>
 
-              {/* Bundle Carousel (Right on Desktop Show 15, Below on Show 8 / Mobile) */}
-              <div className="lg:col-span-7 w-full overflow-hidden">
-                <BundleCarousel
-                  bundleId={bundleId}
-                  recipeName={recipe ? recipe.title : 'Mediterranean Salmon Bowl'}
-                  items={bundleItems}
-                  totalPrice={bundleTotalPrice}
-                  maxBudget={maxBudget}
-                  savingsAmount={savingsAmount}
-                  onSwapItem={handleSwapItem}
-                  onAddToCart={handleAddToCart}
-                  isAddingToCart={isAddingToCart}
-                />
+                {/* Main Interactive Stage: Recipe Card & Bundle Carousel */}
+                {(recipe || bundleItems.length > 0) && (
+                  <div className="w-full my-2 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                    {/* Recipe Card */}
+                    {recipe && (
+                      <div className="lg:col-span-5 w-full">
+                        <RecipeCard
+                          {...recipe}
+                          onStartCooking={handleStartCooking}
+                          isGuidedCookingActive={isGuidedCookingActive}
+                        />
+                      </div>
+                    )}
+
+                    {/* Bundle Carousel */}
+                    {bundleItems.length > 0 && (
+                      <div className="lg:col-span-7 w-full overflow-hidden">
+                        <BundleCarousel
+                          bundleId={bundleId}
+                          recipeName={recipe ? recipe.title : 'Mediterranean Salmon Bowl'}
+                          items={bundleItems}
+                          totalPrice={bundleTotalPrice}
+                          maxBudget={maxBudget}
+                          savingsAmount={savingsAmount}
+                          onSwapItem={handleSwapItem}
+                          onAddToCart={handleAddToCart}
+                          isAddingToCart={isAddingToCart}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            </div>
+            )}
           </main>
         </div>
 
@@ -492,25 +584,27 @@ ${JSON.stringify(m.payload, null, 2)}
             LAYER 03: Components Layer (Floating Docks, Drawers, Modals)
             ======================================================== */}
         <div data-testid="layer-03-components" className="relative z-30">
-          {/* Sticky Cart Summary Dock */}
-          <CartSummaryDock
-            itemCount={cartCount}
-            subtotal={cartSubtotal}
-            estimatedTax={cartTax}
-            total={cartTotal}
-            maxBudget={maxBudget}
-            savingsAmount={savingsAmount}
-            version={cartVersion}
-            onAddToCart={handleAddToCart}
-            isAdding={isAddingToCart}
-            isConflict={isCartConflict}
-            onResolveConflict={() => {
-              setIsCartConflict(false);
-              setCartVersion((v) => v + 1);
-            }}
-          />
+          {/* Sticky Cart Summary Dock (Renders only when items in cart or bundle active) */}
+          {(bundleItems.length > 0 || cartCount > 0) && stage === 'active' && (
+            <CartSummaryDock
+              itemCount={cartCount}
+              subtotal={cartSubtotal}
+              estimatedTax={cartTax}
+              total={cartTotal}
+              maxBudget={maxBudget}
+              savingsAmount={savingsAmount}
+              version={cartVersion}
+              onAddToCart={handleAddToCart}
+              isAdding={isAddingToCart}
+              isConflict={isCartConflict}
+              onResolveConflict={() => {
+                setIsCartConflict(false);
+                setCartVersion((v) => v + 1);
+              }}
+            />
+          )}
 
-          {/* Diagnostic Protocol Wire Inspector Drawer */}
+          {/* Diagnostic Protocol Wire Inspector Drawer (Hidden unless debug requested) */}
           <ProtocolInspector
             isOpen={isInspectorOpen}
             onClose={() => setIsInspectorOpen(false)}
